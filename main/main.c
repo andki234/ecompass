@@ -69,10 +69,9 @@ static esp_err_t i2c_master_init(void) {
 static esp_err_t i2c_scan_for_sensors(sensor_info_t *sensors, int *sensor_count) {
     int i;
     esp_err_t espRc;
-    printf("Scanning I2C bus...\n");
     *sensor_count = 0;
 
-    for (i = 1; i < 127; i++) {
+    for (i = 1; i < 126; i++) {
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, (i << 1) | I2C_MASTER_WRITE, true);
@@ -82,7 +81,6 @@ static esp_err_t i2c_scan_for_sensors(sensor_info_t *sensors, int *sensor_count)
         i2c_cmd_link_delete(cmd);
 
         if (espRc == ESP_OK) {
-            printf("Found device at address 0x%02x\n", i);
             // Check if the device is the LSM6DSOX or LIS3MDL by reading the WHO_AM_I register
             uint8_t who_am_i;
             espRc = i2c_master_write_read_device(I2C_MASTER_NUM, i, (uint8_t[]){LSM6DSOX_WHO_AM_I}, 1, &who_am_i, 1, 1000 / portTICK_PERIOD_MS);
@@ -90,8 +88,10 @@ static esp_err_t i2c_scan_for_sensors(sensor_info_t *sensors, int *sensor_count)
                 sensor_type_t type = SENSOR_UNKNOWN;
                 if (who_am_i == LSM6DSOX_WHO_AM_I_VALUE) {
                     type = SENSOR_LSM6DSOX;
+                    ESP_LOGI(TAG, "Found LSM6DSOX device at address 0x%02x", i);
                 } else if (who_am_i == LIS3MDL_WHO_AM_I_VALUE) {
                     type = SENSOR_LIS3MDL;
+                    ESP_LOGI(TAG, "Found LIS3MDL device at address 0x%02x", i);
                 }
 
                 sensors[*sensor_count].address = i;
@@ -165,6 +165,28 @@ void sensor_task(void* arg) {
     }
 }
 
+
+/**
+ * @brief Macro for checking and handling custom ESP errors.
+ *
+ * This macro is used to check the return value of ESP functions and handle any errors that occur.
+ * It is typically used in conjunction with ESP functions that return an error code.
+ * It is not rebboting as the ESP_ERROR_CHECK macro does.
+ * The macro takes a single argument, which is the ESP function call to be checked.
+ * If the return value is not ESP_OK, the macro will execute the error handling code.
+ * 
+ * @param x The ESP function call to be checked.
+ */
+#define ESP_ERROR_CHECK_CUSTOM(x) do {                                    \
+        esp_err_t err_rc_ = (x);                                          \
+        if (err_rc_ != ESP_OK) {                                          \
+            ESP_LOGE(TAG, "ESP_ERROR_CHECK failed: esp_err_t 0x%x", err_rc_); \
+            while (true) {                                                \
+                vTaskDelay(pdMS_TO_TICKS(1000));                          \
+            }                                                             \
+        }                                                                 \
+    } while(0)
+
 void app_main(void) {
 
     //uart_init();
@@ -175,7 +197,7 @@ void app_main(void) {
         for (int i = 0; i < sensor_count; i++) {
             if (sensors[i].type == SENSOR_LSM6DSOX) {
                 ESP_LOGI(TAG, "LSM6DSOX found at address 0x%02x", sensors[i].address);
-                ESP_ERROR_CHECK(lsm6dsox_init(I2C_MASTER_NUM, sensors[i].address));
+                ESP_ERROR_CHECK_CUSTOM(lsm6dsox_init(I2C_MASTER_NUM, sensors[i].address));
 
                 configure_gpio_interrupt();
 
@@ -189,7 +211,8 @@ void app_main(void) {
                 gpio_isr_handler((void*) GPIO_INT1_PIN);
             } else if (sensors[i].type == SENSOR_LIS3MDL) {
                 ESP_LOGI(TAG, "LIS3MDL found at address 0x%02x", sensors[i].address);
-                // Initialize and read LIS3MDL data here (assuming you have a similar driver for LIS3MDL)
+                vTaskDelay(100 / portTICK_PERIOD_MS);
+                ESP_ERROR_CHECK_CUSTOM(lis3mdl_init(I2C_MASTER_NUM, sensors[i].address));
             } else {
                 ESP_LOGI(TAG, "Unknown sensor found at address 0x%02x", sensors[i].address);
             }

@@ -4,57 +4,44 @@
 static const char *TAG = "LIS3MDL";
 
 esp_err_t lis3mdl_init(i2c_port_t i2c_num, uint8_t i2c_addr) {
-    uint8_t who_am_i;
+    uint8_t who_am_i, read_value;
     esp_err_t ret;
 
     // Check WHO_AM_I register
     ret = i2c_master_write_read_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_WHO_AM_I}, 1, &who_am_i, 1, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read WHO_AM_I register");
-        return ret;
-    }
-    if (who_am_i != LIS3MDL_WHO_AM_I_VALUE) {
-        ESP_LOGE(TAG, "Unexpected WHO_AM_I value: 0x%02x, expected: 0x%02x", who_am_i, LIS3MDL_WHO_AM_I_VALUE);
-        return ESP_FAIL;
+    if (ret != ESP_OK || who_am_i != LIS3MDL_WHO_AM_I_VALUE) {
+         ESP_LOGE(TAG, "Unexpected WHO_AM_I value: 0x%02x, expected: 0x%02x", who_am_i, LIS3MDL_WHO_AM_I_VALUE);
+        return (ret == ESP_OK) ? ESP_FAIL : ret;
     }
 
-    // Configure control registers
-    uint8_t ctrl_reg1_value = 0b01110000;  // Temp sensor disabled, ultra-high performance mode, ODR = 80 Hz
-    ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_CTRL_REG1, ctrl_reg1_value}, 2, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure CTRL_REG1");
-        return ret;
+    // Define the register-value pairs for initialization
+    struct {
+        uint8_t reg;
+        uint8_t val;
+    } init_values[] = {
+        {LIS3MDL_CTRL_REG1, 0b01111100},  // Enable temperature sensor, high-performance mode, ODR = 100 Hz
+        {LIS3MDL_CTRL_REG2, 0b00000000},  // Set full-scale to ±4 gauss
+        {LIS3MDL_CTRL_REG3, 0b00000000},  // Set to continuous-conversion mode
+        {LIS3MDL_CTRL_REG4, 0b00001100},  // Z-axis ultra-high-performance mode
+        {LIS3MDL_CTRL_REG5, 0b01000000}   // Block data update for magnetic data
+    };
+
+    // Initialize the device registers
+    for (size_t i = 0; i < sizeof(init_values) / sizeof(init_values[0]); i++) {
+        ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){init_values[i].reg, init_values[i].val}, 2, 1000 / portTICK_PERIOD_MS);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write to register 0x%02x", init_values[i].reg);
+            return ret;
+        }
+        // Read back and verify register value
+        ret = i2c_master_write_read_device(i2c_num, i2c_addr, &init_values[i].reg, 1, &read_value, 1, 1000 / portTICK_PERIOD_MS);
+        if (ret != ESP_OK || read_value != init_values[i].val) {
+            ESP_LOGE(TAG, "Failed to verify register 0x%02x: read 0x%02x, expected 0x%02x", init_values[i].reg, read_value, init_values[i].val);
+            return ESP_FAIL;
+        }
     }
 
-    uint8_t ctrl_reg2_value = 0b00000000;  // Full-scale selection = ±4 gauss
-    ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_CTRL_REG2, ctrl_reg2_value}, 2, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure CTRL_REG2");
-        return ret;
-    }
-
-    uint8_t ctrl_reg3_value = 0b00000000;  // Continuous-conversion mode
-    ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_CTRL_REG3, ctrl_reg3_value}, 2, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure CTRL_REG3");
-        return ret;
-    }
-
-    uint8_t ctrl_reg4_value = 0b00000000;  // Ultra-high performance mode for Z axis
-    ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_CTRL_REG4, ctrl_reg4_value}, 2, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure CTRL_REG4");
-        return ret;
-    }
-
-    uint8_t ctrl_reg5_value = 0b00000000;  // Fast read disabled, block data update enabled
-    ret = i2c_master_write_to_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_CTRL_REG5, ctrl_reg5_value}, 2, 1000 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure CTRL_REG5");
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "LIS3MDL initialized successfully");
+    ESP_LOGI(TAG, "LIS3MDL initialized and configured successfully");
     return ESP_OK;
 }
 
