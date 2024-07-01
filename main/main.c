@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 
 /*
+
 ESP32S3-DevKitC          LSM6DSOX
 +----------------+       +---------+
 |                |       |         |
@@ -22,6 +23,17 @@ ESP32S3-DevKitC          LSM6DSOX
 | 3.3V           +-------+ VCC     |
 | GPIO 4 (INT1)  +-------+ INT1    |
 +----------------+       +---------+
+
+ESP32S3-DevKitC          LIS3MDL
++----------------+       +---------+
+|                |       |         |
+| GPIO 9 (SCL)   +-------+ SCL     |
+| GPIO 8 (SDA)   +-------+ SDA     |
+| GND            +-------+ GND     |
+| 3.3V           +-------+ VCC     |
+| GPIO 5 (INT2)  +-------+ DRDY    |
++----------------+       +---------+
+
 */
 
 #define I2C_MASTER_SCL_IO           9           // GPIO number for I2C master clock
@@ -43,12 +55,19 @@ typedef struct {
     sensor_type_t type;
 } sensor_info_t;
 
+typedef struct {
+    uint32_t gpio_num;
+    int64_t timestamp;
+    int64_t duration;  // Duration between interrupts
+} interrupt_event_t;
+
 #define MAX_SENSORS 10
 
 static const char *TAG = "ecompass";
 static sensor_info_t sensors[MAX_SENSORS];
 static int sensor_count = 0;
 static TaskHandle_t sensor_task_handle = NULL;
+static QueueHandle_t gpio_evt_queue = NULL;
 
 // Function to get the sensor address based on sensor type
 uint8_t get_sensor_address(sensor_type_t type) {
@@ -123,34 +142,31 @@ static esp_err_t i2c_scan_for_sensors(sensor_info_t *sensors, int *sensor_count)
 
 // Interrupt variables for LSM6DSOX INT1 pin
 static int64_t _last_interrupt_time_int1 = 0;
-static int64_t _current_time_int1 = 0;
-static int64_t _duration_int1 = 0;
 
-// Interrupt variables for LIS3MDL INT2 pin
+// Interrupt variables for LIS3MDL DRDY pin
 static int64_t _last_interrupt_time_int2 = 0;
-static int64_t _current_time_int2 = 0;
-static int64_t _duration_int2 = 0;
 
-
-// ISR handler function
-void IRAM_ATTR gpio_isr_handler(void* arg) {
-    uint32_t gpio_num = (uint32_t) arg;
-    // Handle the interrupt (e.g., toggle an LED or set a flag)
-    if (gpio_num == LSM6SDOX_GPIO_INT_PIN) {
-        // Handle interrupt for LSM6SDOX_GPIO_INT_PIN (pin 4)
-        _current_time_int1 = esp_timer_get_time();
-        _duration_int1 = _current_time_int1 - _last_interrupt_time_int1;
-        _last_interrupt_time_int1 = _current_time_int1;
-        xTaskNotifyFromISR(sensor_task_handle, gpio_num, eSetBits, NULL);
-    } else if (gpio_num == LIS3MDL_GPIO_INT_PIN) {
-        // Handle interrupt for LIS3MDL_GPIO_INT_PIN (pin 5)
-        _current_time_int2 = esp_timer_get_time();
-        _duration_int2 = _current_time_int2 - _last_interrupt_time_int2;
-        _last_interrupt_time_int2 = _current_time_int2;
-        xTaskNotifyFromISR(sensor_task_handle, gpio_num, eSetBits, NULL);
-    }
+// ISR handler function for LSM6DSOX
+void IRAM_ATTR lsm6sdox_isr_handler(void* arg) {
+    int64_t current_time = esp_timer_get_time();
+    interrupt_event_t evt;
+    evt.gpio_num = LSM6SDOX_GPIO_INT_PIN;
+    evt.timestamp = current_time;
+    evt.duration = current_time - _last_interrupt_time_int1;
+    _last_interrupt_time_int1 = current_time;
+    xQueueSendFromISR(gpio_evt_queue, &evt, NULL);
 }
 
+// ISR handler function for LIS3MDL
+void IRAM_ATTR lis3mdl_isr_handler(void* arg) {
+    int64_t current_time = esp_timer_get_time();
+    interrupt_event_t evt;
+    evt.gpio_num = LIS3MDL_GPIO_INT_PIN;
+    evt.timestamp = current_time;
+    evt.duration = current_time - _last_interrupt_time_int2;
+    _last_interrupt_time_int2 = current_time;
+    xQueueSendFromISR(gpio_evt_queue, &evt, NULL);
+}
 
 /**
  * Configures the GPIO interrupts.
@@ -180,41 +196,40 @@ void configure_gpio_interrupts() {
     gpio_install_isr_service(0);
 
     // Hook ISR handler for the specific pins
-    gpio_isr_handler_add(LSM6SDOX_GPIO_INT_PIN, gpio_isr_handler, (void*) LSM6SDOX_GPIO_INT_PIN);  
-    gpio_isr_handler_add(LIS3MDL_GPIO_INT_PIN, gpio_isr_handler, (void*) LIS3MDL_GPIO_INT_PIN);    
+    gpio_isr_handler_add(LSM6SDOX_GPIO_INT_PIN, lsm6sdox_isr_handler, (void*) LSM6SDOX_GPIO_INT_PIN);  
+    gpio_isr_handler_add(LIS3MDL_GPIO_INT_PIN, lis3mdl_isr_handler, (void*) LIS3MDL_GPIO_INT_PIN);    
 }
 
 static int16_t accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z;
 
+
 void sensor_task(void* arg) {
     uint8_t status;
     esp_err_t ret;
-    uint32_t gpio_num;
+    interrupt_event_t evt;
     
     while (1) {
-        if (xTaskNotifyWait(0x00, ULONG_MAX, &gpio_num, portMAX_DELAY)) {    
-            if (gpio_num == LSM6SDOX_GPIO_INT_PIN) {
+        if (xQueueReceive(gpio_evt_queue, &evt, portMAX_DELAY)) {    
+            if (evt.gpio_num == LSM6SDOX_GPIO_INT_PIN) {
                 // Handle interrupt from LSM6DSOX
                 ret = i2c_master_write_read_device(I2C_MASTER_NUM, get_sensor_address(SENSOR_LSM6DSOX), (uint8_t[]){LSM6DSOX_STATUS_REG}, 1, &status, 1, 1000 / portTICK_PERIOD_MS);
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to read LSM6DSOX status register");
                 } else if (status & 0b00000011) {
                     if (lsm6dsox_read_accel_gyro(I2C_MASTER_NUM, get_sensor_address(SENSOR_LSM6DSOX), &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z) == ESP_OK) {
-                        double sample_rate = 1.0 / ((double)_duration_int1 * 1e-6);
-                        ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d", _duration_int1, sample_rate, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                        double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
+                        ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
                     } else {
                         ESP_LOGE(TAG, "Failed to read accelerometer and gyroscope data");
                     }
                 } else {
                     ESP_LOGI(TAG, "No data available");
                 }
-            } else if (gpio_num == LIS3MDL_GPIO_INT_PIN) {
+            } else if (evt.gpio_num == LIS3MDL_GPIO_INT_PIN) {
                 // Handle interrupt from LIS3MDL
-                //uint8_t int_src;
-                //lis3_mdl_read_interrupt_status(I2C_MASTER_NUM, get_sensor_address(SENSOR_LIS3MDL), &int_src); 
                 if (lis3mdl_read_magnetometer(I2C_MASTER_NUM, get_sensor_address(SENSOR_LIS3MDL), &mag_x, &mag_y, &mag_z) == ESP_OK) {
-                    double sample_rate = 1.0 / ((double)_duration_int2 * 1e-6);
-                    ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", _duration_int2, sample_rate, mag_x, mag_y, mag_z);
+                    double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
+                    ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, mag_x, mag_y, mag_z);
                 } else {
                     ESP_LOGE(TAG, "Failed to read magnetometer data");
                 }
@@ -223,12 +238,16 @@ void sensor_task(void* arg) {
     }
 }
 
+
 void app_main() {
     // Initialize I2C master
     ESP_ERROR_CHECK(i2c_master_init());
 
+    // Create a queue to handle GPIO events
+    gpio_evt_queue = xQueueCreate(10, sizeof(interrupt_event_t));
+
     // Create the sensor task pinned to Core 1
-    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 4096, NULL, 10, &sensor_task_handle, 1);
+    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 2048, NULL, 10, &sensor_task_handle, 1);
 
     configure_gpio_interrupts();
 
@@ -257,8 +276,8 @@ void app_main() {
             vTaskDelay(100 / portTICK_PERIOD_MS);
 
             // Make an initial call to the ISR handler to trigger the first reads
-            gpio_isr_handler((void*) LSM6SDOX_GPIO_INT_PIN);
-            gpio_isr_handler((void*) LIS3MDL_GPIO_INT_PIN);
+            lsm6sdox_isr_handler((void*) LSM6SDOX_GPIO_INT_PIN);
+            lis3mdl_isr_handler((void*) LIS3MDL_GPIO_INT_PIN);
         }
     } else {
         ESP_LOGE(TAG, "No sensors found on I2C bus");
