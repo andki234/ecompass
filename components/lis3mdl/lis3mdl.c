@@ -1,4 +1,5 @@
 #include "lis3mdl.h"
+#include "esp_err.h"
 #include "esp_log.h"
 
 static const char *TAG = "LIS3MDL";
@@ -23,7 +24,8 @@ esp_err_t lis3mdl_init(i2c_port_t i2c_num, uint8_t i2c_addr) {
         {LIS3MDL_CTRL_REG2, 0b00000000},  // Set full-scale to ±4 gauss
         {LIS3MDL_CTRL_REG3, 0b00000000},  // Set to continuous-conversion mode
         {LIS3MDL_CTRL_REG4, 0b00001100},  // Z-axis ultra-high-performance mode
-        {LIS3MDL_CTRL_REG5, 0b01000000}   // Block data update for magnetic data
+        {LIS3MDL_CTRL_REG5, 0b01000000},   // Block data update for magnetic data
+        {LIS3MDL_INT_CFG, 0b11101111}      // Enable interrupts on all axes
     };
 
     // Initialize the device registers
@@ -59,6 +61,22 @@ esp_err_t lis3mdl_read_magnetometer(i2c_port_t i2c_num, uint8_t i2c_addr, int16_
     *mag_y = (int16_t)(data[3] << 8 | data[2]);
     *mag_z = (int16_t)(data[5] << 8 | data[4]);
 
-    ESP_LOGI(TAG, "Magnetometer data - X: %d, Y: %d, Z: %d", *mag_x, *mag_y, *mag_z);
     return ESP_OK;
 }
+
+esp_err_t lis3_mdl_read_interrupt_status(i2c_port_t i2c_num, uint8_t i2c_addr, uint8_t *istatus) {
+    uint8_t data[1];
+    esp_err_t ret;
+
+    ret = i2c_master_write_read_device(i2c_num, i2c_addr, (uint8_t[]){LIS3MDL_INT_SRC}, 1, data, 1, 1000 / portTICK_PERIOD_MS);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read interrupt status");
+        return ret;
+    }
+
+    *istatus = data[0];
+
+    ESP_LOGI(TAG, "Interrupt status: %d", *istatus);
+    return ESP_OK;
+}
+    

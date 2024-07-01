@@ -4,6 +4,7 @@
 #include "driver/i2c.h"
 #include "esp_err.h"
 #include "sensors.h"
+#include <inttypes.h>
 
 #define LIS3MDL_ADDR 0x1E // I2C address for LIS3MDL
 
@@ -23,9 +24,13 @@
 #define LIS3MDL_OUTZ_L      0x2C // Z-axis low byte
 #define LIS3MDL_OUTZ_H      0x2D // Z-axis high byte
 
+#define LIS3MDL_INT_CFG     0x30 // Interrupt configuration
+#define LIS3MDL_INT_SRC     0x31 // Interrupt source
+
 #define LIS3MDL_WHO_AM_I_VALUE 0x3D // Expected WHO_AM_I value for LIS3MDL
 
 esp_err_t lis3mdl_init(i2c_port_t i2c_num, uint8_t i2c_addr);
 esp_err_t lis3mdl_read_magnetometer(i2c_port_t i2c_num, uint8_t i2c_addr, int16_t *mag_x, int16_t *mag_y, int16_t *mag_z);
+esp_err_t lis3_mdl_read_interrupt_status(i2c_port_t i2c_num, uint8_t i2c_addr, uint8_t *istatus);
 
 #endif // LIS3MDL_H
