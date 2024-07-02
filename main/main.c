@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "main.h"
+#include "json_sensor_data.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c.h"
@@ -217,8 +218,9 @@ void sensor_task(void* arg) {
                     ESP_LOGE(TAG, "Failed to read LSM6DSOX status register");
                 } else if (status & 0b00000011) {
                     if (lsm6dsox_read_accel_gyro(I2C_MASTER_NUM, get_sensor_address(SENSOR_LSM6DSOX), &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z) == ESP_OK) {
-                        double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
-                        ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                        print_json_gyro_acc_data(evt.duration, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                        //double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
+                        //ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
                     } else {
                         ESP_LOGE(TAG, "Failed to read accelerometer and gyroscope data");
                     }
@@ -228,8 +230,9 @@ void sensor_task(void* arg) {
             } else if (evt.gpio_num == LIS3MDL_GPIO_INT_PIN) {
                 // Handle interrupt from LIS3MDL
                 if (lis3mdl_read_magnetometer(I2C_MASTER_NUM, get_sensor_address(SENSOR_LIS3MDL), &mag_x, &mag_y, &mag_z) == ESP_OK) {
-                    double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
-                    ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, mag_x, mag_y, mag_z);
+                    print_json_mag_data(evt.duration, mag_x, mag_y, mag_z);
+                    //double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
+                    //ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, mag_x, mag_y, mag_z);
                 } else {
                     ESP_LOGE(TAG, "Failed to read magnetometer data");
                 }
@@ -247,7 +250,7 @@ void app_main() {
     gpio_evt_queue = xQueueCreate(10, sizeof(interrupt_event_t));
 
     // Create the sensor task pinned to Core 1
-    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 2048, NULL, 10, &sensor_task_handle, 1);
+    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 4096, NULL, 10, &sensor_task_handle, 1);
 
     configure_gpio_interrupts();
 
