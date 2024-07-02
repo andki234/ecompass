@@ -29,7 +29,7 @@ void print_json_mag_data(int64_t sampletime, int x, int y, int z) {
     cJSON *mag_data = cJSON_CreateArray();
 
     // Add sampletime and mag_data arrays to the root object
-    cJSON_AddItemToObject(root, "sample", sampletimes);
+    cJSON_AddItemToObject(root, "sampletime", sampletimes);
     cJSON_AddItemToObject(root, "mag_data", mag_data);
 
     // Add sampletime to the sampletimes array
