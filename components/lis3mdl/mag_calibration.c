@@ -10,18 +10,12 @@ static const float A[3][3] = {
 
 static const float b[3] = {-0.096459982696593, -0.066528083920667, -0.325974886182747};
 
-void mag_calibration(float raw_x, float raw_y, float raw_z, float *cal_x, float *cal_y, float *cal_z) {
+// Inline keyword suggests the compiler to inline this function, reducing call overhead
+inline void mag_calibration(float raw_x, float raw_y, float raw_z, float *cal_x, float *cal_y, float *cal_z) {
     float raw[3] = {raw_x, raw_y, raw_z};
-    float cal[3] = {0};
 
-    for (int i = 0; i < 3; i++) {
-        cal[i] = b[i];
-        for (int j = 0; j < 3; j++) {
-            cal[i] += A[i][j] * raw[j];
-        }
-    }
-
-    *cal_x = cal[0];
-    *cal_y = cal[1];
-    *cal_z = cal[2];
+    // Ensure the calculations leverage FPU by avoiding unnecessary operations
+    *cal_x = b[0] + A[0][0] * raw[0] + A[0][1] * raw[1] + A[0][2] * raw[2];
+    *cal_y = b[1] + A[1][0] * raw[0] + A[1][1] * raw[1] + A[1][2] * raw[2];
+    *cal_z = b[2] + A[2][0] * raw[0] + A[2][1] * raw[1] + A[2][2] * raw[2];
 }
