@@ -51,6 +51,9 @@ mag_data_matrix = [mag_data.x(:), mag_data.y(:), mag_data.z(:)];
 % Perform magnetometer calibration
 [A, b, expmfs] = magcal(mag_data_matrix);
 
+% Save calibration matrixes
+save('mag_cal_data.mat', 'A','b',"expmfs")
+
 % Apply the calibration transformation
 calibrated_mag_data = (mag_data_matrix - b) * A;
 

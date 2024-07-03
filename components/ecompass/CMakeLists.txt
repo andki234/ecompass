@@ -1,3 +1,3 @@
-idf_component_register(SRCS "mag_calibration.c" "lis3mdl.c"
+idf_component_register(SRCS "ecompass.c"
                        INCLUDE_DIRS "."
                        REQUIRES sensors driver)

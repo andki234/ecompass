@@ -10,8 +10,9 @@
 #include "lsm6dsox.h"
 #include "lis3mdl.h"
 #include "sensors.h"
-#include "uart_wrapper.h"
 #include "esp_timer.h"
+#include "mag_calibration.h"
+#include "ecompass.h"
 
 /*
 
@@ -201,14 +202,38 @@ void configure_gpio_interrupts() {
     gpio_isr_handler_add(LIS3MDL_GPIO_INT_PIN, lis3mdl_isr_handler, (void*) LIS3MDL_GPIO_INT_PIN);    
 }
 
-static int16_t accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z;
-
+static int16_t accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_raw_x, mag_raw_y, mag_raw_z;
+static float cal_x, cal_y, cal_z;
 
 void sensor_task(void* arg) {
     uint8_t status;
     esp_err_t ret;
     interrupt_event_t evt;
-    
+
+    //Make an initial call to the ISR handler to trigger the first reads
+    lsm6sdox_isr_handler((void*) LSM6SDOX_GPIO_INT_PIN);
+
+    // Fetch 500 of data to calibrate the gyroscope
+    ESP_LOGE(TAG, "Calibrating stationary level gyroscope with 500 samples");
+    reset_sensor_calibration();
+    int16_t cnt = 0;
+    while (cnt < 500) {
+        if (xQueueReceive(gpio_evt_queue, &evt, portMAX_DELAY)) {
+            if (evt.gpio_num == LSM6SDOX_GPIO_INT_PIN) {
+                if (lsm6dsox_read_accel_gyro(I2C_MASTER_NUM, get_sensor_address(SENSOR_LSM6DSOX), &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z) == ESP_OK) {
+                    calibrate_gyro_stationary(gyro_x, gyro_y, gyro_z);
+                    cnt++;
+                } else {
+                    ESP_LOGE(TAG, "Failed to read accelerometer and gyroscope data");
+                }
+            }
+        }
+    }
+
+    //Make an initial call to the ISR handler to trigger the first reads
+    lsm6sdox_isr_handler((void*) LSM6SDOX_GPIO_INT_PIN);
+    lis3mdl_isr_handler((void*) LIS3MDL_GPIO_INT_PIN);
+
     while (1) {
         if (xQueueReceive(gpio_evt_queue, &evt, portMAX_DELAY)) {    
             if (evt.gpio_num == LSM6SDOX_GPIO_INT_PIN) {
@@ -218,7 +243,8 @@ void sensor_task(void* arg) {
                     ESP_LOGE(TAG, "Failed to read LSM6DSOX status register");
                 } else if (status & 0b00000011) {
                     if (lsm6dsox_read_accel_gyro(I2C_MASTER_NUM, get_sensor_address(SENSOR_LSM6DSOX), &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z) == ESP_OK) {
-                        print_json_gyro_acc_data(evt.duration, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                        insert_accel_gyro_data(accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, 1.0 / ((float)evt.duration * 1e-6));
+                        //print_json_gyro_acc_data(evt.duration, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
                         //double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
                         //ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
                     } else {
@@ -229,10 +255,15 @@ void sensor_task(void* arg) {
                 }
             } else if (evt.gpio_num == LIS3MDL_GPIO_INT_PIN) {
                 // Handle interrupt from LIS3MDL
-                if (lis3mdl_read_magnetometer(I2C_MASTER_NUM, get_sensor_address(SENSOR_LIS3MDL), &mag_x, &mag_y, &mag_z) == ESP_OK) {
-                    print_json_mag_data(evt.duration, mag_x, mag_y, mag_z);
+                if (lis3mdl_read_magnetometer(I2C_MASTER_NUM, get_sensor_address(SENSOR_LIS3MDL), &mag_raw_x, &mag_raw_y, &mag_raw_z) == ESP_OK) {
+                    //print_json_mag_data(evt.duration, mag_raw_x, mag_raw_y, mag_raw_z);
+                    mag_calibration(mag_raw_x, mag_raw_y, mag_raw_z, &cal_x, &cal_y, &cal_z);
+                    insert_mag_data(cal_x, cal_y, cal_z, 1.0 / ((float)evt.duration * 1e-6));
+                    
+                    //print_json_mag_data(evt.duration, cal_x, cal_y, cal_z);
+                    // Calculate the heading
                     //double sample_rate = 1.0 / ((double)evt.duration * 1e-6);
-                    //ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, mag_x, mag_y, mag_z);
+                    //ESP_LOGI(TAG, "Time: %lld us | Sample rate: %.2f Hz | Magnetometer: X=%d, Y=%d, Z=%d", evt.duration, sample_rate, mag_raw_x, mag_raw_y, mag_raw_z);
                 } else {
                     ESP_LOGE(TAG, "Failed to read magnetometer data");
                 }
@@ -248,11 +279,6 @@ void app_main() {
 
     // Create a queue to handle GPIO events
     gpio_evt_queue = xQueueCreate(10, sizeof(interrupt_event_t));
-
-    // Create the sensor task pinned to Core 1
-    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 4096, NULL, 10, &sensor_task_handle, 1);
-
-    configure_gpio_interrupts();
 
     // Scan for sensors on the I2C bus
     esp_err_t err = i2c_scan_for_sensors(sensors, &sensor_count);
@@ -275,16 +301,12 @@ void app_main() {
         }
 
         // If both sensors are found, configure GPIO interrupts and create the sensor task
-        if (lsm6dsox_found && lis3mdl_found) {
-            vTaskDelay(100 / portTICK_PERIOD_MS);
-
-            // Make an initial call to the ISR handler to trigger the first reads
-            lsm6sdox_isr_handler((void*) LSM6SDOX_GPIO_INT_PIN);
-            lis3mdl_isr_handler((void*) LIS3MDL_GPIO_INT_PIN);
+        if (lsm6dsox_found && lis3mdl_found) {    
+            // Create the sensor task pinned to Core 1
+            xTaskCreatePinnedToCore(sensor_task, "sensor_task", 4096, NULL, 10, &sensor_task_handle, 1);
+            configure_gpio_interrupts();
         }
     } else {
         ESP_LOGE(TAG, "No sensors found on I2C bus");
     }
 }
-
-
