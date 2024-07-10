@@ -1,13 +1,20 @@
 #include "ecompass.h"
+#include "esp_log.h"
 
-#define GYRO_SENSITIVITY 114.0    // LSB/dps for ±125 dps (LIS6DS3)
+// Set TAG for logging
+static const char *TAG = "ECOMPASS";
+
+#define GYRO_SENSITIVITY 228.57   // LSB/dps for ±125 dps (LIS6DSOX)
 #define ACC_SENSITIVITY 16384.0   // LSB/g for ±2 g (LIS6DSOX)
 #define MAG_SENSITIVITY 6842.0    // LSB/gauss for ±4 gauss (LIS3MDL)
 
 // Noise parameters from datasheet
 #define GYROSCOPE_NOISE (4e-3 * 4e-3) // (rad/s)^2
 #define ACCELEROMETER_NOISE (90e-6 * 90e-6) // (m/s^2)^2
-#define MAGNETOMETER_NOISE ((3.2e-3 + 3.2e-3 + 4.1e-3) / 3 * (3.2e-3 + 3.2e-3 + 4.1e-3) / 3) // (gauss)^2
+#define MAGNETOMETER_NOISE (3.5e-3 * 3.5e-3) // (gauss)^2
+
+#define ALPHA 0.1 // Smoothing factor for exponential moving average
+#define BETA 0.98 // Complementary filter coefficient for gyroscope yaw blending
 
 static float pitch = 0.0, roll = 0.0, yaw = 0.0, gyro_yaw = 0.0;
 static KalmanFilter kf_pitch, kf_roll, kf_yaw;
@@ -33,6 +40,9 @@ typedef struct {
 } GyroCalibrationData;
 
 static GyroCalibrationData gyro_cal_data = {0};
+
+// For smoothing
+static float mag_x_smooth = 0.0, mag_y_smooth = 0.0, mag_z_smooth = 0.0;
 
 void kalman_init(KalmanFilter *kf, float q, float r, float initial_value) {
     kf->q = q;
@@ -111,8 +121,12 @@ void insert_accel_gyro_data(float acc_x, float acc_y, float acc_z, float gyro_x,
     gyro_yaw = fmod(gyro_yaw, 360.0);
     if (gyro_yaw < 0) gyro_yaw += 360.0;
 
+    // Update the complementary filter for yaw using gyro data
+    yaw = BETA * (yaw + gyro_z * dt) + (1 - BETA) * yaw;
+
     // Print Euler angles for verification
-    printf("Pitch: %.2f degrees, Roll: %.2f degrees, Gyro Yaw: %.2f degrees Magnetic Yaw:  %.2f\n ", pitch * 180.0 / M_PI, roll * 180.0 / M_PI, gyro_yaw, yaw);
+    printf("\033[32mPitch: %.2f degrees\tRoll: %.2f degrees\tGyro Yaw: %.2f degrees\tMagnetic Yaw: %.2f\033[0m\r", pitch * 180.0 / M_PI, roll * 180.0 / M_PI, gyro_yaw, yaw);
+
 }
 
 void insert_mag_data(float mag_x, float mag_y, float mag_z, float sample_rate) {
@@ -131,15 +145,20 @@ void insert_mag_data(float mag_x, float mag_y, float mag_z, float sample_rate) {
     mag_y /= MAG_SENSITIVITY;
     mag_z /= MAG_SENSITIVITY;
 
+    // Exponential moving average for smoothing
+    mag_x_smooth = ALPHA * mag_x + (1 - ALPHA) * mag_x_smooth;
+    mag_y_smooth = ALPHA * mag_y + (1 - ALPHA) * mag_y_smooth;
+    mag_z_smooth = ALPHA * mag_z + (1 - ALPHA) * mag_z_smooth;
+
     // Normalize magnetometer data
-    float mag_norm = sqrt(mag_x * mag_x + mag_y * mag_y + mag_z * mag_z);
-    mag_x /= mag_norm;
-    mag_y /= mag_norm;
-    mag_z /= mag_norm;
+    float mag_norm = sqrt(mag_x_smooth * mag_x_smooth + mag_y_smooth * mag_y_smooth + mag_z_smooth * mag_z_smooth);
+    mag_x_smooth /= mag_norm;
+    mag_y_smooth /= mag_norm;
+    mag_z_smooth /= mag_norm;
 
     // Tilt compensation for magnetometer
-    float mag_x_comp = mag_x * cos(pitch) + mag_z * sin(pitch);
-    float mag_y_comp = mag_x * sin(roll) * sin(pitch) + mag_y * cos(roll) - mag_z * sin(roll) * cos(pitch);
+    float mag_x_comp = mag_x_smooth * cos(pitch) + mag_y_smooth * sin(roll) * sin(pitch) + mag_z_smooth * cos(roll) * sin(pitch);
+    float mag_y_comp = mag_y_smooth * cos(roll) - mag_z_smooth * sin(roll);
 
     // Calculate heading
     float heading = atan2(mag_y_comp, mag_x_comp);
@@ -152,11 +171,8 @@ void insert_mag_data(float mag_x, float mag_y, float mag_z, float sample_rate) {
         heading += 360.0;
     }
 
-    // Update Kalman filter with the new heading
-    yaw = kalman_update(&kf_yaw, heading);
-
-    // Print heading for verification
-    //printf("Heading: %.2f degrees\n", heading);
+    // Apply complementary filter correction for yaw using magnetometer data
+    yaw = BETA * yaw + (1 - BETA) * heading;
 }
 
 float get_heading() {
